@@ -1,143 +1,155 @@
--- 1. INSTITUTIONS TABLE
--- Represents hospitals, clinics, or private practices.
+-- =====================================================
+-- JAMEDIS - MySQL Schema (Aiven MySQL, InnoDB, utf8mb4)
+-- Run this against your Aiven database (default: defaultdb)
+-- =====================================================
+
+SET FOREIGN_KEY_CHECKS = 0;
+DROP TABLE IF EXISTS audit_logs;
+DROP TABLE IF EXISTS prescriptions;
+DROP TABLE IF EXISTS clinical_notes;
+DROP TABLE IF EXISTS patient_institution_access;
+DROP TABLE IF EXISTS patients;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS institutions;
+SET FOREIGN_KEY_CHECKS = 1;
+
+-- 1. Institutions ------------------------------------------------
 CREATE TABLE institutions (
-    institution_id INT AUTO_INCREMENT PRIMARY KEY,
-    name VARCHAR(150) NOT NULL,
-    type ENUM('hospital', 'clinic', 'private', 'other') NOT NULL,
-    address TEXT NOT NULL,
-    contact_number VARCHAR(20),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+  id             INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  name           VARCHAR(150) NOT NULL,
+  type           ENUM('hospital','clinic','private','other') NOT NULL DEFAULT 'other',
+  address        VARCHAR(255) NULL,
+  contact_number VARCHAR(30)  NULL,
+  created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 2. USERS TABLE (Staff, Doctors, Nurses, Admins)
--- Everyone who logs into the system goes here.
+-- 2. Users -------------------------------------------------------
 CREATE TABLE users (
-    user_id INT AUTO_INCREMENT PRIMARY KEY,
-    institution_id INT NOT NULL,
-    role ENUM('admin', 'doctor', 'nurse', 'staff') NOT NULL,
-    email VARCHAR(100) UNIQUE NOT NULL,
-    password_hash VARCHAR(255) NOT NULL, -- Note: Never store plain text passwords
-    first_name VARCHAR(50) NOT NULL,
-    last_name VARCHAR(50) NOT NULL,
-    is_active BOOLEAN DEFAULT TRUE,
-    FOREIGN KEY (institution_id) REFERENCES institutions(institution_id)
-);
+  id             INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  institution_id INT UNSIGNED NOT NULL,
+  role           ENUM('admin','doctor','nurse','staff') NOT NULL DEFAULT 'staff',
+  email          VARCHAR(190) NOT NULL,
+  password_hash  VARCHAR(255) NOT NULL,
+  first_name     VARCHAR(80)  NOT NULL,
+  last_name      VARCHAR(80)  NOT NULL,
+  created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_users_email (email),
+  KEY idx_users_institution (institution_id),
+  CONSTRAINT fk_users_institution FOREIGN KEY (institution_id)
+    REFERENCES institutions (id) ON DELETE RESTRICT ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 3. PATIENTS TABLE
--- The core demographic data for the citizen.
+-- 3. Patients ----------------------------------------------------
 CREATE TABLE patients (
-    patient_id INT AUTO_INCREMENT PRIMARY KEY,
-    trn VARCHAR(20) UNIQUE NOT NULL, -- Used for checking in
-    first_name VARCHAR(50) NOT NULL,
-    last_name VARCHAR(50) NOT NULL,
-    date_of_birth DATE NOT NULL,
-    blood_type VARCHAR(5),
-    profile_photo_url VARCHAR(255), -- URL to the uploaded photo
-    is_photo_verified BOOLEAN DEFAULT FALSE, -- Checked by the photo authenticator
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+  id                INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  trn               VARCHAR(15)  NOT NULL,
+  first_name        VARCHAR(80)  NOT NULL,
+  last_name         VARCHAR(80)  NOT NULL,
+  date_of_birth     DATE NOT NULL,
+  profile_photo_url VARCHAR(500) NULL,
+  is_photo_verified BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_patients_trn (trn)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 4. PATIENT_INSTITUTION_ACCESS (The Privacy Lock)
--- This table ensures an institution can ONLY see a patient if they checked them in.
+-- 4. Patient <-> Institution access ------------------------------
+-- Institutions may only see patients they have checked in.
 CREATE TABLE patient_institution_access (
-    access_id INT AUTO_INCREMENT PRIMARY KEY,
-    patient_id INT NOT NULL,
-    institution_id INT NOT NULL,
-    first_checked_in_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    checked_in_by_user_id INT NOT NULL,
-    UNIQUE KEY unique_patient_inst (patient_id, institution_id),
-    FOREIGN KEY (patient_id) REFERENCES patients(patient_id),
-    FOREIGN KEY (institution_id) REFERENCES institutions(institution_id),
-    FOREIGN KEY (checked_in_by_user_id) REFERENCES users(user_id)
-);
+  id                    INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  patient_id            INT UNSIGNED NOT NULL,
+  institution_id        INT UNSIGNED NOT NULL,
+  checked_in_by_user_id INT UNSIGNED NOT NULL,
+  checked_in_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_patient_institution (patient_id, institution_id),
+  KEY idx_pia_institution (institution_id),
+  KEY idx_pia_user (checked_in_by_user_id),
+  CONSTRAINT fk_pia_patient FOREIGN KEY (patient_id)
+    REFERENCES patients (id) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT fk_pia_institution FOREIGN KEY (institution_id)
+    REFERENCES institutions (id) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT fk_pia_user FOREIGN KEY (checked_in_by_user_id)
+    REFERENCES users (id) ON DELETE RESTRICT ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 5. APPOINTMENTS TABLE
-CREATE TABLE appointments (
-    appointment_id INT AUTO_INCREMENT PRIMARY KEY,
-    patient_id INT NOT NULL,
-    institution_id INT NOT NULL,
-    doctor_id INT, -- NULL if the patient hasn't been assigned a doctor yet
-    appointment_time DATETIME NOT NULL,
-    status ENUM('pending', 'accepted', 'completed', 'cancelled') DEFAULT 'pending',
-    reason_for_visit TEXT,
-    FOREIGN KEY (patient_id) REFERENCES patients(patient_id),
-    FOREIGN KEY (institution_id) REFERENCES institutions(institution_id),
-    FOREIGN KEY (doctor_id) REFERENCES users(user_id)
-);
-
--- 6. MEDICAL_VISITS (History & Check-ins)
--- Tracks each time a patient is seen. Required for the "Recent visits" view.
-CREATE TABLE medical_visits (
-    visit_id INT AUTO_INCREMENT PRIMARY KEY,
-    patient_id INT NOT NULL,
-    institution_id INT NOT NULL,
-    doctor_id INT,
-    visit_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    check_in_verified_by_id INT, -- The staff member who checked them in
-    FOREIGN KEY (patient_id) REFERENCES patients(patient_id),
-    FOREIGN KEY (institution_id) REFERENCES institutions(institution_id),
-    FOREIGN KEY (doctor_id) REFERENCES users(user_id),
-    FOREIGN KEY (check_in_verified_by_id) REFERENCES users(user_id)
-);
-
--- 7. CLINICAL_NOTES (Doctors & Nurses)
--- Nurses see a summary (flagged), Doctors see everything.
+-- 5. Clinical notes ----------------------------------------------
 CREATE TABLE clinical_notes (
-    note_id INT AUTO_INCREMENT PRIMARY KEY,
-    visit_id INT NOT NULL,
-    author_id INT NOT NULL, -- Doctor or Nurse
-    is_critical_illness BOOLEAN DEFAULT FALSE, -- If TRUE, Nurses cannot view
-    summary_for_nurses TEXT, -- The safe summary nurses can see
-    full_medical_notes TEXT, -- The detailed notes for Doctors only
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (visit_id) REFERENCES medical_visits(visit_id),
-    FOREIGN KEY (author_id) REFERENCES users(user_id)
-);
+  id                  INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  patient_id          INT UNSIGNED NOT NULL,
+  author_id           INT UNSIGNED NOT NULL,
+  is_critical_illness BOOLEAN NOT NULL DEFAULT FALSE,
+  summary_for_nurses  TEXT NULL,
+  full_medical_notes  TEXT NULL,
+  created_at          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_notes_patient (patient_id),
+  KEY idx_notes_author (author_id),
+  CONSTRAINT fk_notes_patient FOREIGN KEY (patient_id)
+    REFERENCES patients (id) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT fk_notes_author FOREIGN KEY (author_id)
+    REFERENCES users (id) ON DELETE RESTRICT ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 8. DIAGNOSES
-CREATE TABLE diagnoses (
-    diagnosis_id INT AUTO_INCREMENT PRIMARY KEY,
-    visit_id INT NOT NULL,
-    doctor_id INT NOT NULL,
-    icd10_code VARCHAR(10), -- Standard medical code
-    description TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (visit_id) REFERENCES medical_visits(visit_id),
-    FOREIGN KEY (doctor_id) REFERENCES users(user_id)
-);
-
--- 9. ALLERGIES
-CREATE TABLE allergies (
-    allergy_id INT AUTO_INCREMENT PRIMARY KEY,
-    patient_id INT NOT NULL,
-    allergen VARCHAR(100) NOT NULL,
-    severity ENUM('mild', 'moderate', 'severe') NOT NULL,
-    noted_by_doctor_id INT NOT NULL,
-    FOREIGN KEY (patient_id) REFERENCES patients(patient_id),
-    FOREIGN KEY (noted_by_doctor_id) REFERENCES users(user_id)
-);
-
--- 10. PRESCRIPTIONS
+-- 6. Prescriptions -----------------------------------------------
 CREATE TABLE prescriptions (
-    prescription_id INT AUTO_INCREMENT PRIMARY KEY,
-    visit_id INT NOT NULL,
-    doctor_id INT NOT NULL,
-    medication_name VARCHAR(100) NOT NULL,
-    dosage VARCHAR(50) NOT NULL,
-    instructions TEXT,
-    is_active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (visit_id) REFERENCES medical_visits(visit_id),
-    FOREIGN KEY (doctor_id) REFERENCES users(user_id)
-);
+  id              INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  patient_id      INT UNSIGNED NOT NULL,
+  doctor_id       INT UNSIGNED NOT NULL,
+  medication_name VARCHAR(150) NOT NULL,
+  dosage          VARCHAR(100) NOT NULL,
+  is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_rx_patient (patient_id),
+  KEY idx_rx_doctor (doctor_id),
+  CONSTRAINT fk_rx_patient FOREIGN KEY (patient_id)
+    REFERENCES patients (id) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT fk_rx_doctor FOREIGN KEY (doctor_id)
+    REFERENCES users (id) ON DELETE RESTRICT ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 11. AUDIT_LOG (DPA 2020 Compliance)
+-- 7. Audit logs --------------------------------------------------
 CREATE TABLE audit_logs (
-    log_id INT AUTO_INCREMENT PRIMARY KEY,
-    user_id INT,
-    institution_id INT,
-    action VARCHAR(100) NOT NULL, -- e.g., 'VIEW_PATIENT', 'CHECK_IN', 'EDIT_NOTE'
-    patient_id INT, -- If applicable
-    ip_address VARCHAR(45),
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+  id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  user_id    INT UNSIGNED NULL,
+  action     VARCHAR(255) NOT NULL,
+  patient_id INT UNSIGNED NULL,
+  ip_address VARCHAR(45)  NULL,
+  `timestamp` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_audit_timestamp (`timestamp`),
+  KEY idx_audit_user (user_id),
+  KEY idx_audit_patient (patient_id),
+  CONSTRAINT fk_audit_user FOREIGN KEY (user_id)
+    REFERENCES users (id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT fk_audit_patient FOREIGN KEY (patient_id)
+    REFERENCES patients (id) ON DELETE SET NULL ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- =====================================================
+-- SEED DATA (demo only)
+-- All demo users have the password:  Password123
+-- (stored as a SHA-256 hex digest, matching server.js)
+-- =====================================================
+INSERT INTO institutions (name, type, address, contact_number) VALUES
+  ('Kingston Public Hospital', 'hospital', 'North Street, Kingston', '876-922-0210'),
+  ('Spanish Town Health Centre', 'clinic', 'Burke Road, Spanish Town', '876-984-2000'),
+  ('Caribbean Family Care', 'private', 'Half Way Tree Road, Kingston 10', '876-929-1000');
+
+INSERT INTO users (institution_id, role, email, password_hash, first_name, last_name) VALUES
+  (1, 'admin',  'admin@jamedis.com',  SHA2('Password123', 256), 'Marcia',  'Campbell'),
+  (1, 'doctor', 'doctor@jamedis.com', SHA2('Password123', 256), 'Andre',   'Brown'),
+  (2, 'nurse',  'nurse@jamedis.com',  SHA2('Password123', 256), 'Shanice', 'Williams');
+
+INSERT INTO patients (trn, first_name, last_name, date_of_birth, is_photo_verified) VALUES
+  ('123456789', 'Jerome',  'Thompson', '1988-03-14', TRUE),
+  ('234567891', 'Keisha',  'Reid',     '1995-11-02', FALSE),
+  ('345678912', 'Winston', 'Clarke',   '1962-07-29', TRUE);
+
+INSERT INTO patient_institution_access (patient_id, institution_id, checked_in_by_user_id) VALUES
+  (1, 1, 2),
+  (2, 1, 1),
+  (3, 2, 3);
