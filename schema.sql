@@ -111,6 +111,22 @@ CREATE TABLE prescriptions (
     REFERENCES users (id) ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+
+-- After a failed login attempt:
+UPDATE users
+SET   failed_attempts = failed_attempts + 1,
+      locked_until    = CASE
+          WHEN failed_attempts >= 5 THEN NOW() + INTERVAL 15 MINUTE
+          ELSE locked_until
+      END
+WHERE id = ?;
+
+-- Check lockout before authenticating:
+SELECT id, password_hash, locked_until
+FROM   users
+WHERE  email = ?
+  AND (locked_until IS NULL OR locked_until < NOW());
+
 -- 7. Audit logs --------------------------------------------------
 CREATE TABLE audit_logs (
   id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
