@@ -93,6 +93,47 @@ CREATE TABLE clinical_notes (
     REFERENCES users (id) ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+--7 --
+CREATE TABLE users (
+    id                INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    email             VARCHAR(255) NOT NULL,
+    password_hash     VARCHAR(255) NOT NULL,
+    email_verified    TINYINT(1)   NOT NULL DEFAULT 0,
+    failed_attempts   TINYINT UNSIGNED NOT NULL DEFAULT 0,
+    locked_until      DATETIME     NULL,
+    created_at        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_users_email (email);
+
+--8 MFA Secrets--
+CREATE TABLE mfa_secrets (
+    user_id     INT UNSIGNED NOT NULL,
+    secret      VARCHAR(32)  NOT NULL,
+    enabled     TINYINT(1)   NOT NULL DEFAULT 0,
+    verified_at DATETIME     NULL,
+    PRIMARY KEY (user_id),
+    CONSTRAINT fk_mfa_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+);
+
+---9----
+-- After a failed login attempt:
+UPDATE users
+SET   failed_attempts = failed_attempts + 1,
+      locked_until    = CASE
+          WHEN failed_attempts >= 5 THEN NOW() + INTERVAL 15 MINUTE
+          ELSE locked_until
+      END
+WHERE id = ?;
+
+-- Check lockout before authenticating:
+SELECT id, password_hash, locked_until
+FROM   users
+WHERE  email = ?
+  AND (locked_until IS NULL OR locked_until < NOW());
+
+
+
 -- 6. Prescriptions -----------------------------------------------
 CREATE TABLE prescriptions (
   id              INT UNSIGNED NOT NULL AUTO_INCREMENT,
