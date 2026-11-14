@@ -7,6 +7,8 @@ SET FOREIGN_KEY_CHECKS = 0;
 DROP TABLE IF EXISTS audit_logs;
 DROP TABLE IF EXISTS prescriptions;
 DROP TABLE IF EXISTS clinical_notes;
+DROP TABLE IF EXISTS mfa_secrets;
+DROP TABLE IF EXISTS dispensing_logs;
 DROP TABLE IF EXISTS patient_institution_access;
 DROP TABLE IF EXISTS patients;
 DROP TABLE IF EXISTS users;
@@ -17,7 +19,7 @@ SET FOREIGN_KEY_CHECKS = 1;
 CREATE TABLE institutions (
   id             INT UNSIGNED NOT NULL AUTO_INCREMENT,
   name           VARCHAR(150) NOT NULL,
-  type           ENUM('hospital','clinic','private','other') NOT NULL DEFAULT 'other',
+  type           ENUM('hospital','clinic','private','pharmacy', 'other') NOT NULL DEFAULT 'other',
   address        VARCHAR(255) NULL,
   contact_number VARCHAR(30)  NULL,
   created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -28,12 +30,15 @@ CREATE TABLE institutions (
 CREATE TABLE users (
   id             INT UNSIGNED NOT NULL AUTO_INCREMENT,
   institution_id INT UNSIGNED NOT NULL,
-  role           ENUM('admin','doctor','nurse','staff') NOT NULL DEFAULT 'staff',
+  role           ENUM('admin','doctor','nurse','staff', 'pharmacist') NOT NULL DEFAULT 'staff',
   email          VARCHAR(190) NOT NULL,
   password_hash  VARCHAR(255) NOT NULL,
+  failed_attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  locked_until   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   first_name     VARCHAR(80)  NOT NULL,
   last_name      VARCHAR(80)  NOT NULL,
-  created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   UNIQUE KEY uq_users_email (email),
   KEY idx_users_institution (institution_id),
@@ -47,6 +52,7 @@ CREATE TABLE patients (
   trn               VARCHAR(15)  NOT NULL,
   first_name        VARCHAR(80)  NOT NULL,
   last_name         VARCHAR(80)  NOT NULL,
+  phone_number      VARCHAR (20) NULL,
   date_of_birth     DATE NOT NULL,
   profile_photo_url VARCHAR(500) NULL,
   is_photo_verified BOOLEAN NOT NULL DEFAULT FALSE,
@@ -81,9 +87,11 @@ CREATE TABLE clinical_notes (
   patient_id          INT UNSIGNED NOT NULL,
   author_id           INT UNSIGNED NOT NULL,
   is_critical_illness BOOLEAN NOT NULL DEFAULT FALSE,
+  allergies           TEXT NULL,
   summary_for_nurses  TEXT NULL,
   full_medical_notes  TEXT NULL,
   created_at          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   KEY idx_notes_patient (patient_id),
   KEY idx_notes_author (author_id),
@@ -93,47 +101,6 @@ CREATE TABLE clinical_notes (
     REFERENCES users (id) ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
---7 --
-CREATE TABLE users (
-    id                INT UNSIGNED NOT NULL AUTO_INCREMENT,
-    email             VARCHAR(255) NOT NULL,
-    password_hash     VARCHAR(255) NOT NULL,
-    email_verified    TINYINT(1)   NOT NULL DEFAULT 0,
-    failed_attempts   TINYINT UNSIGNED NOT NULL DEFAULT 0,
-    locked_until      DATETIME     NULL,
-    created_at        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    PRIMARY KEY (id),
-    UNIQUE KEY uq_users_email (email);
-
---8 MFA Secrets--
-CREATE TABLE mfa_secrets (
-    user_id     INT UNSIGNED NOT NULL,
-    secret      VARCHAR(32)  NOT NULL,
-    enabled     TINYINT(1)   NOT NULL DEFAULT 0,
-    verified_at DATETIME     NULL,
-    PRIMARY KEY (user_id),
-    CONSTRAINT fk_mfa_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-);
-
----9----
--- After a failed login attempt:
-UPDATE users
-SET   failed_attempts = failed_attempts + 1,
-      locked_until    = CASE
-          WHEN failed_attempts >= 5 THEN NOW() + INTERVAL 15 MINUTE
-          ELSE locked_until
-      END
-WHERE id = ?;
-
--- Check lockout before authenticating:
-SELECT id, password_hash, locked_until
-FROM   users
-WHERE  email = ?
-  AND (locked_until IS NULL OR locked_until < NOW());
-
-
-
 -- 6. Prescriptions -----------------------------------------------
 CREATE TABLE prescriptions (
   id              INT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -141,6 +108,9 @@ CREATE TABLE prescriptions (
   doctor_id       INT UNSIGNED NOT NULL,
   medication_name VARCHAR(150) NOT NULL,
   dosage          VARCHAR(100) NOT NULL,
+  refills_allowed INT UNSIGNED NOT NULL DEFAULT 0,
+  refills_remaining INT UNSIGNED NOT NULL DEFAULT 0,
+  pharmacy_institution INT UNSIGNED NOT NULL DEFAULT 0,
   is_active       BOOLEAN NOT NULL DEFAULT TRUE,
   created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
@@ -152,7 +122,36 @@ CREATE TABLE prescriptions (
     REFERENCES users (id) ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 7. Audit logs --------------------------------------------------
+--7. Dispencing Log Trcaker--
+CREATE TABLE dispensing_logs (
+  id         INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  prescription_id INT UNSIGNED NOT NULL,
+  pharmacist_id INT UNSIGNED NOT NULL,
+  pharmacy_institution INT UNSIGNED NOT NULL,
+  medication_name INT UNSIGNED NOT NULL,
+  quantity_dispensed VARCHAR (100) NOT NULL,
+  dispensed_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_dispense_rx (prescription_id),
+  KEY idx_dispense_pharmacy (pharmacist_id),
+  CONSTRAINT fk_dispense_prescription FOREIGN KEY (prescription_id)
+    REFERENCES prescriptions (id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_dispense_institution FOREIGN KEY (pharmacy_institution)
+    REFERENCES institutions (id) ON DELETE RESTRICT ON UPDATE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+--8. Implementing a MFA Secret TOTP (Time Based One Time Password)--
+
+  CREATE TABLE mfa_secrets (
+    user_id     INT UNSIGNED NOT NULL,
+    secret      VARCHAR(32)  NOT NULL,
+    enabled     TINYINT(1)   NOT NULL DEFAULT 0,
+    verified_at DATETIME     NULL,
+    PRIMARY KEY (user_id),
+    CONSTRAINT fk_mfa_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+);
+  
+-- 9. Audit logs --------------------------------------------------
 CREATE TABLE audit_logs (
   id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   user_id    INT UNSIGNED NULL,
@@ -178,12 +177,14 @@ CREATE TABLE audit_logs (
 INSERT INTO institutions (name, type, address, contact_number) VALUES
   ('Kingston Public Hospital', 'hospital', 'North Street, Kingston', '876-922-0210'),
   ('Spanish Town Health Centre', 'clinic', 'Burke Road, Spanish Town', '876-984-2000'),
-  ('Caribbean Family Care', 'private', 'Half Way Tree Road, Kingston 10', '876-929-1000');
+  ('Caribbean Family Care', 'private', 'Half Way Tree Road, Kingston 10', '876-929-1000'),
+  ('New Deanery Pharmacy', 'pharmacy', 'Deanery Road, Kingston 3', '876-759-8909');
 
 INSERT INTO users (institution_id, role, email, password_hash, first_name, last_name) VALUES
   (1, 'admin',  'admin@jamedis.com',  SHA2('Password123', 256), 'Marcia',  'Campbell'),
   (1, 'doctor', 'doctor@jamedis.com', SHA2('Password123', 256), 'Andre',   'Brown'),
-  (2, 'nurse',  'nurse@jamedis.com',  SHA2('Password123', 256), 'Shanice', 'Williams');
+  (2, 'nurse',  'nurse@jamedis.com',  SHA2('Password123', 256), 'Shanice', 'Williams'),
+  (3, 'pharmacist', 'pharmacist@jamedis.com', SHA2('Password123', 256), 'Karen', 'McKnight');
 
 INSERT INTO patients (trn, first_name, last_name, date_of_birth, is_photo_verified) VALUES
   ('123456789', 'Jerome',  'Thompson', '1988-03-14', TRUE),
