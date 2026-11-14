@@ -34,7 +34,7 @@ CREATE TABLE users (
   email          VARCHAR(190) NOT NULL,
   password_hash  VARCHAR(255) NOT NULL,
   failed_attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,
-  locked_until   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  locked_until   TIMESTAMP NULL DEFAULT NULL,
   created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   first_name     VARCHAR(80)  NOT NULL,
@@ -124,16 +124,16 @@ CREATE TABLE prescriptions (
 
 --7. Dispencing Log Trcaker--
 CREATE TABLE dispensing_logs (
-  id         INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
   prescription_id INT UNSIGNED NOT NULL,
   pharmacist_id INT UNSIGNED NOT NULL,
   pharmacy_institution INT UNSIGNED NOT NULL,
-  medication_name INT UNSIGNED NOT NULL,
   quantity_dispensed VARCHAR (100) NOT NULL,
   dispensed_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   KEY idx_dispense_rx (prescription_id),
   KEY idx_dispense_pharmacy (pharmacist_id),
+  CONSTRAINT fk_dispense_pharmacist FOREIGN KEY (pharmacist_id) REFERENCES users (id) ON DELETE RESTRICT ON UPDATE CASCADE,
   CONSTRAINT fk_dispense_prescription FOREIGN KEY (prescription_id)
     REFERENCES prescriptions (id) ON DELETE RESTRICT ON UPDATE CASCADE,
   CONSTRAINT fk_dispense_institution FOREIGN KEY (pharmacy_institution)
@@ -184,7 +184,7 @@ INSERT INTO users (institution_id, role, email, password_hash, first_name, last_
   (1, 'admin',  'admin@jamedis.com',  SHA2('Password123', 256), 'Marcia',  'Campbell'),
   (1, 'doctor', 'doctor@jamedis.com', SHA2('Password123', 256), 'Andre',   'Brown'),
   (2, 'nurse',  'nurse@jamedis.com',  SHA2('Password123', 256), 'Shanice', 'Williams'),
-  (3, 'pharmacist', 'pharmacist@jamedis.com', SHA2('Password123', 256), 'Karen', 'McKnight');
+  (4, 'pharmacist', 'pharmacist@jamedis.com', SHA2('Password123', 256), 'Karen', 'McKnight');
 
 INSERT INTO patients (trn, first_name, last_name, date_of_birth, is_photo_verified) VALUES
   ('123456789', 'Jerome',  'Thompson', '1988-03-14', TRUE),
