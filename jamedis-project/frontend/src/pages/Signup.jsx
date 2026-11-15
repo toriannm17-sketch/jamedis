@@ -109,7 +109,8 @@ export default function Signup() {
               <select id="role" value={form.role} onChange={update('role')} className="input">
                 <option value="doctor">Doctor</option>
                 <option value="nurse">Nurse</option>
-                <option value="staff">Administrative staff</option>
+                <option value="staff">Administrative Staff</option>
+                <option value="pharmacist">Pharmacist</option>
               </select>
             </div>
 

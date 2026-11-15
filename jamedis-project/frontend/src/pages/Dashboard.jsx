@@ -111,6 +111,17 @@ export default function Dashboard({ user }) {
     loadLogs();
   };
 
+  // Mark a patient's photo ID as verified
+  const handleVerifyPhoto = async (patientId) => {
+  try {
+    const { data } = await api.patch(`/api/patients/${patientId}/verify-photo`);
+    setFlash(data.message);
+    loadPatients();
+  } catch (err) {
+    setPatientsError(getErrorMessage(err, 'Unable to verify patient photo ID.'));
+  }
+};
+
   useEffect(() => {
     loadPatients();
     loadLogs();
@@ -269,12 +280,36 @@ export default function Dashboard({ user }) {
                           <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700">
                             <BadgeCheck size={14} /> Verified
                           </span>
+                        ) : ['staff', 'nurse'].includes(user?.role) ? (
+                          <button
+                            type="button"
+                            onClick={() => handleVerifyPhoto(p.id)}
+                            className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700 hover:bg-amber-100"
+                            title="Click to confirm physical Photo ID"
+                          >
+                            <BadgeAlert size={14} /> Verify ID
+                          </button>
                         ) : (
                           <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700">
                             <BadgeAlert size={14} /> Not verified
                           </span>
                         )}
                       </td>
+            
+                      {/* REPLACED 
+                      <td className="px-5 py-3.5">
+                        {p.is_photo_verified ? (
+                          <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700">
+                            <BadgeCheck size={14} /> Verified
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700">
+                            <BadgeAlert size={14} /> Not verified
+                          </span>
+                        )}
+                      </td>
+                      */}
+                      
                     </tr>
                   ))}
                 </tbody>
