@@ -135,7 +135,7 @@ app.post('/api/auth/signup', async (req, res) => {
       return res.status(400).json({ message: 'Password must be at least 8 characters.' });
     }
     // Admin accounts cannot be self-registered.
-    const allowedRoles = ['doctor', 'nurse', 'staff'];
+    const allowedRoles = ['doctor', 'nurse', 'staff', 'pharmacist'];
     const safeRole = allowedRoles.includes(role) ? role : 'staff';
 
     const [inst] = await pool.query('SELECT id FROM institutions WHERE id = ?', [institution_id]);
@@ -279,6 +279,324 @@ app.get('/api/audit-logs', async (req, res) => {
   } catch (err) {
     console.error('[audit-logs]', err);
     return res.status(500).json({ message: 'Unable to load audit logs.' });
+  }
+});
+
+/***************************************************************************/
+/* Prescriptions API (Doctor and Pharmacy)                                 */
+/***************************************************************************/ 
+// POST /api/prescriptions (Doctor adds a prescription to a patient account)
+app.post('/api/prescriptions', async (req, res) => {
+  const { patient_id, medication_name, dosage, quantity, notes } = req.body || {};
+  const doctorId = parseInt(req.headers['x-user-id'], 10);
+
+  if (!patient_id || !medication_name || !dosage) {
+    return res.status(400).json({ message: 'Patient, medication name, and dosage are required.' });
+  }
+
+  try {
+    const [result] = await pool.query(
+      `INSERT INTO prescriptions (patient_id, doctor_id, medication_name, dosage, quantity, notes, is_active)
+       VALUES (?, ?, ?, ?, ?, ?, TRUE)`,
+      [patient_id, doctorId, medication_name.trim(), dosage.trim(), quantity || '30 days supply', notes || null]
+    );
+
+    res.locals.auditPatientId = patient_id;
+    res.locals.auditUserId = doctorId;
+
+    return res.status(201).json({ id: result.insertId, message: 'Prescription added to patient account.' });
+  } catch (err) {
+    console.error('[prescriptions:create]', err);
+    return res.status(500).json({ message: 'Unable to save prescription.' });
+  }
+});
+
+// GET /api/pharmacy/patient/:trn/unfilled (Pharmacy looks up a patient by TRN and returns their unfilled prescriptions)
+app.get('/api/pharmacy/patient/:trn/unfilled', async (req, res) => {
+  const cleanTrn = String(req.params.trn).replace(/[\s-]/g, '');
+  if (!/^\d{9}$/.test(cleanTrn)) {
+    return res.status(400).json({ message: 'TRN must be exactly 9 digits.' });
+  }
+
+  try {
+    const [patients] = await pool.query(
+      'SELECT id, trn, first_name, last_name, date_of_birth, is_photo_verified FROM patients WHERE trn = ? LIMIT 1',
+      [cleanTrn]
+    );
+
+    if (patients.length === 0) {
+      return res.status(404).json({ message: 'No patient account found with that TRN.' });
+    }
+
+    const patient = patients;
+    res.locals.auditPatientId = patient.id;
+
+    const [unfilled] = await pool.query(
+      `SELECT p.id, p.medication_name, p.dosage, p.quantity, p.notes, p.created_at,
+              CONCAT(u.first_name, ' ', u.last_name) AS doctor_name,
+              i.name AS institution_name
+         FROM prescriptions p
+         JOIN users u ON u.id = p.doctor_id
+         JOIN institutions i ON i.id = u.institution_id
+        WHERE p.patient_id = ? AND p.is_active = TRUE
+        ORDER BY p.created_at DESC`,
+      [patient.id]
+    );
+
+    return res.json({ patient, unfilled_prescriptions: unfilled });
+  } catch (err) {
+    console.error('[pharmacy:lookup]', err);
+    return res.status(500).json({ message: 'Unable to look up patient prescriptions.' });
+  }
+});
+
+// PATCH /api/pharmacy/prescriptions/:id/fill (Pharmacy marks a prescription as filled)
+app.patch('/api/pharmacy/prescriptions/:id/fill', async (req, res) => {
+  const rxId = parseInt(req.params.id, 10);
+  const pharmacistId = parseInt(req.headers['x-user-id'], 10);
+
+  try {
+    const [rows] = await pool.query(
+      'SELECT patient_id FROM prescriptions WHERE id = ? AND is_active = TRUE LIMIT 1',
+      [rxId]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Unfilled prescription not found or already dispensed.' });
+    }
+
+    await pool.query(
+      `UPDATE prescriptions
+          SET is_active = FALSE,
+              filled_by_user_id = ?,
+              filled_at = CURRENT_TIMESTAMP
+        WHERE id = ?`,
+      [pharmacistId, rxId]
+    );
+
+    res.locals.auditPatientId = rows.patient_id;
+    res.locals.auditUserId = pharmacistId;
+
+    return res.json({ message: 'Prescription dispensed and marked as filled.' });
+  } catch (err) {
+    console.error('[pharmacy:fill]', err);
+    return res.status(500).json({ message: 'Unable to mark prescription as filled.' });
+  }
+});
+
+/******************************************************************************/
+/* Patient Portal APIs (Patient self-service)                                 */
+/******************************************************************************/
+// POST /api/auth/patient-login  (Patient login via 9-digit TRN + Date of Birth)
+app.post('/api/auth/patient-login', async (req, res) => {
+  try {
+    const { trn, dob } = req.body || {};
+    const cleanTrn = String(trn || '').replace(/[\s-]/g, '');
+
+    if (!/^\d{9}$/.test(cleanTrn) || !dob) {
+      return res.status(400).json({ message: 'Valid 9-digit TRN and Date of Birth are required.' });
+    }
+
+    const [rows] = await pool.query(
+      'SELECT id, trn, first_name, last_name, date_of_birth, is_photo_verified FROM patients WHERE trn = ? AND date_of_birth = ? LIMIT 1',
+      [cleanTrn, dob]
+    );
+
+    const patient = rows;
+    if (!patient) {
+      return res.status(401).json({ message: 'No patient record matched that TRN and Date of Birth.' });
+    }
+
+    res.locals.auditPatientId = patient.id;
+
+    const user = {
+      id: patient.id,
+      patient_id: patient.id,
+      institution_id: null,
+      institution_name: 'Patient Self-Service Portal',
+      role: 'patient',
+      trn: patient.trn,
+      first_name: patient.first_name,
+      last_name: patient.last_name,
+      name: `${patient.first_name} ${patient.last_name}`,
+      date_of_birth: patient.date_of_birth,
+      is_photo_verified: patient.is_photo_verified,
+    };
+
+    const token = createMockJwt({ sub: patient.id, role: 'patient', trn: patient.trn });
+    return res.json({ token, user });
+  } catch (err) {
+    console.error('[patient-login]', err);
+    return res.status(500).json({ message: 'Unable to sign in right now. Please try again.' });
+  }
+});
+
+// GET /api/patients/:id/summary  (Longitudinal record, prescriptions, visits & access log for PatientPortal)
+app.get('/api/patients/:id/summary', async (req, res) => {
+  const patientId = parseInt(req.params.id, 10);
+  if (!Number.isInteger(patientId)) {
+    return res.status(400).json({ message: 'Invalid patient ID.' });
+  }
+
+  try {
+    const [[patient]] = await pool.query(
+      'SELECT id, trn, first_name, last_name, date_of_birth, is_photo_verified, created_at FROM patients WHERE id = ?',
+      [patientId]
+    );
+    if (!patient) {
+      return res.status(404).json({ message: 'Patient record not found.' });
+    }
+
+    const [prescriptions] = await pool.query(
+      `SELECT p.id, p.medication_name, p.dosage, p.quantity, p.notes, p.is_active, p.created_at, p.filled_at,
+              CONCAT(u.first_name, ' ', u.last_name) AS doctor_name,
+              i.name AS institution_name
+         FROM prescriptions p
+         JOIN users u ON u.id = p.doctor_id
+         JOIN institutions i ON i.id = u.institution_id
+        WHERE p.patient_id = ?
+        ORDER BY p.created_at DESC`,
+      [patientId]
+    );
+
+    const [visits] = await pool.query(
+      `SELECT pia.checked_in_at, i.name AS institution_name, i.type AS institution_type
+         FROM patient_institution_access pia
+         JOIN institutions i ON i.id = pia.institution_id
+        WHERE pia.patient_id = ?
+        ORDER BY pia.checked_in_at DESC`,
+      [patientId]
+    );
+
+    const [accessLogs] = await pool.query(
+      `SELECT a.id, a.action, a.\`timestamp\`,
+              CONCAT(u.first_name, ' ', u.last_name) AS user_name,
+              i.name AS institution_name
+         FROM audit_logs a
+         LEFT JOIN users u ON u.id = a.user_id
+         LEFT JOIN institutions i ON i.id = u.institution_id
+        WHERE a.patient_id = ?
+        ORDER BY a.\`timestamp\` DESC
+        LIMIT 10`,
+      [patientId]
+    );
+
+    res.locals.auditPatientId = patientId;
+    return res.json({ patient, prescriptions, visits, access_logs: accessLogs });
+  } catch (err) {
+    console.error('[patient-summary]', err);
+    return res.status(500).json({ message: 'Unable to load your health summary.' });
+  }
+});
+
+/******************************************************************************/
+/* Clinical Chart APIs (Doctor & Nurse)                                       */
+/******************************************************************************/
+// GET /api/patients/:id/chart  (Clinical notes & prescriptions for a checked-in patient)
+app.get('/api/patients/:id/chart', async (req, res) => {
+  const patientId = parseInt(req.params.id, 10);
+  if (!Number.isInteger(patientId)) {
+    return res.status(400).json({ message: 'Invalid patient ID.' });
+  }
+
+  try {
+    const [[patient]] = await pool.query(
+      'SELECT id, trn, first_name, last_name, date_of_birth, is_photo_verified FROM patients WHERE id = ?',
+      [patientId]
+    );
+    if (!patient) {
+      return res.status(404).json({ message: 'Patient not found.' });
+    }
+
+    const [notes] = await pool.query(
+      `SELECT cn.id, cn.is_critical_illness, cn.summary_for_nurses, cn.full_medical_notes, cn.created_at,
+              CONCAT(u.first_name, ' ', u.last_name) AS author_name, u.role AS author_role
+         FROM clinical_notes cn
+         JOIN users u ON u.id = cn.author_id
+        WHERE cn.patient_id = ?
+        ORDER BY cn.created_at DESC`,
+      [patientId]
+    );
+
+    const [prescriptions] = await pool.query(
+      `SELECT p.id, p.medication_name, p.dosage, p.quantity, p.notes, p.is_active, p.created_at,
+              CONCAT(u.first_name, ' ', u.last_name) AS doctor_name
+         FROM prescriptions p
+         JOIN users u ON u.id = p.doctor_id
+        WHERE p.patient_id = ?
+        ORDER BY p.created_at DESC`,
+      [patientId]
+    );
+
+    res.locals.auditPatientId = patientId;
+    return res.json({ patient, notes, prescriptions });
+  } catch (err) {
+    console.error('[patient-chart]', err);
+    return res.status(500).json({ message: 'Unable to load clinical chart.' });
+  }
+});
+
+// POST /api/clinical-notes  (Append-only clinical entry — no UPDATE/DELETE endpoints exist)
+app.post('/api/clinical-notes', async (req, res) => {
+  const { patient_id, is_critical_illness, summary_for_nurses, full_medical_notes } = req.body || {};
+  const authorId = parseInt(req.headers['x-user-id'], 10);
+
+  if (!patient_id || (!summary_for_nurses && !full_medical_notes)) {
+    return res.status(400).json({ message: 'Patient and clinical note content are required.' });
+  }
+
+  try {
+    const [result] = await pool.query(
+      `INSERT INTO clinical_notes (patient_id, author_id, is_critical_illness, summary_for_nurses, full_medical_notes)
+       VALUES (?, ?, ?, ?, ?)`,
+      [patient_id, authorId, Boolean(is_critical_illness), summary_for_nurses || null, full_medical_notes || null]
+    );
+
+    res.locals.auditPatientId = patient_id;
+    res.locals.auditUserId = authorId;
+
+    return res.status(201).json({ id: result.insertId, message: 'Clinical entry appended to patient chart.' });
+  } catch (err) {
+    console.error('[clinical-notes:create]', err);
+    return res.status(500).json({ message: 'Unable to append clinical note.' });
+  }
+});
+
+/******************************************************************************/
+/* Admin APIs (System Operators)                                              */
+/******************************************************************************/
+// GET /api/admin/users  (List all system operators & their roles/institutions)
+app.get('/api/admin/users', async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT u.id, u.first_name, u.last_name, u.email, u.role, u.institution_id, u.created_at,
+              i.name AS institution_name
+         FROM users u
+         JOIN institutions i ON i.id = u.institution_id
+        ORDER BY u.created_at DESC, u.id DESC`
+    );
+    return res.json(rows);
+  } catch (err) {
+    console.error('[admin:users]', err);
+    return res.status(500).json({ message: 'Unable to load user accounts.' });
+  }
+});
+
+// PATCH /api/admin/users/:id/role  (Admin updates a user's IAM role)
+app.patch('/api/admin/users/:id/role', async (req, res) => {
+  const targetUserId = parseInt(req.params.id, 10);
+  const { role } = req.body || {};
+  const validRoles = ['admin', 'doctor', 'nurse', 'staff', 'pharmacist'];
+
+  if (!Number.isInteger(targetUserId) || !validRoles.includes(role)) {
+    return res.status(400).json({ message: 'Valid user ID and role are required.' });
+  }
+
+  try {
+    await pool.query('UPDATE users SET role = ? WHERE id = ?', [role, targetUserId]);
+    return res.json({ message: `User role updated to ${role}.` });
+  } catch (err) {
+    console.error('[admin:update-role]', err);
+    return res.status(500).json({ message: 'Unable to update user role.' });
   }
 });
 
