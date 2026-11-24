@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Loader2, AlertCircle, UserPlus } from 'lucide-react';
 import api, { getErrorMessage } from '../api.js';
 
-const initialForm = { first_name: '', last_name: '', trn: '', dob: '' };
+const initialForm = { first_name: '', last_name: '', trn: '', dob: '', consent: false };
 
 export default function CheckIn() {
   const navigate = useNavigate();
@@ -24,6 +24,8 @@ export default function CheckIn() {
       return setError('TRN must be exactly 9 digits.');
     }
 
+    if (!form.consent) return setError('Confirm that the patient has consented before checking them in.');
+
     setLoading(true);
     try {
       const { data } = await api.post('/api/patients/check-in', {
@@ -31,8 +33,9 @@ export default function CheckIn() {
         last_name: form.last_name.trim(),
         trn: cleanTrn,
         dob: form.dob,
+        consent: form.consent,
       });
-      navigate('/', { state: { flash: data.message } });
+      navigate(`/patients/${data.patient.id}`, { state: { flash: data.message } });
     } catch (err) {
       setError(getErrorMessage(err, 'Unable to check in the patient.'));
     } finally {
@@ -94,6 +97,20 @@ export default function CheckIn() {
             <label htmlFor="dob" className="mb-1.5 block text-sm font-medium text-slate-700">Date of birth</label>
             <input id="dob" type="date" required max={today} value={form.dob} onChange={update('dob')} className="input" />
           </div>
+
+          {/* Data Protection Act (2020): consent is recorded with a timestamp */}
+          <label className="flex items-start gap-3 rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700 sm:col-span-2">
+            <input
+              type="checkbox"
+              checked={form.consent}
+              onChange={(e) => setForm((f) => ({ ...f, consent: e.target.checked }))}
+              className="mt-0.5 h-4 w-4 rounded border-slate-300"
+            />
+            <span>
+              The patient has consented to a digital health record being created and shared with institutions involved in
+              their care. Their details are used only for identification and clinical safety.
+            </span>
+          </label>
 
           <div className="flex flex-col-reverse gap-3 sm:col-span-2 sm:flex-row sm:justify-end">
             <Link to="/" className="btn-secondary">Cancel</Link>

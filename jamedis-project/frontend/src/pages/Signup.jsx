@@ -19,7 +19,7 @@ export default function Signup() {
   const [institutions, setInstitutions] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [success, setSuccess] = useState(false);
+  const [success, setSuccess] = useState('');
 
   useEffect(() => {
     api
@@ -43,9 +43,9 @@ export default function Signup() {
     setLoading(true);
     try {
       const { confirm_password, ...payload } = form;
-      await api.post('/api/auth/signup', payload);
-      setSuccess(true);
-      setTimeout(() => navigate('/login'), 1800);
+      const { data } = await api.post('/api/auth/signup', payload);
+      setSuccess(data.message);
+      setTimeout(() => navigate('/login'), data.pending_approval ? 4000 : 1800);
     } catch (err) {
       setError(getErrorMessage(err, 'Unable to create your account.'));
     } finally {
@@ -76,7 +76,7 @@ export default function Signup() {
           {success && (
             <div role="status" className="mt-6 flex items-start gap-2.5 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
               <CheckCircle2 size={18} className="mt-0.5 shrink-0" />
-              <span>Account created. Redirecting you to sign in...</span>
+              <span>{success} Redirecting you to sign in...</span>
             </div>
           )}
 
@@ -123,7 +123,7 @@ export default function Signup() {
             </div>
 
             <div className="sm:col-span-2">
-              <button type="submit" disabled={loading || success} className="btn-primary w-full">
+              <button type="submit" disabled={loading || Boolean(success)} className="btn-primary w-full">
                 {loading && <Loader2 size={18} className="animate-spin" />}
                 {loading ? 'Creating account...' : 'Create account'}
               </button>
